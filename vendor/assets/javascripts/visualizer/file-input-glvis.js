@@ -62,6 +62,7 @@ var AudioAnalyser = (function () {
     function AudioAnalyser(context, fftSize) {
         this._analyser = context.createAnalyser();
         this.fftSize = fftSize;
+        this.segmentSize = fftSize / 8.0;
         this.frequencyBuffer = new Uint8Array(this.fftSize);
         this.timeDomainBuffer = new Uint8Array(this.fftSize);
     }
@@ -77,6 +78,17 @@ var AudioAnalyser = (function () {
             this._analyser.getByteFrequencyData(this.frequencyBuffer);
         }
         return this.frequencyBuffer;
+    };
+    AudioAnalyser.prototype.getEQSegments = function () {
+        if (this.frequencyBuffer != undefined) {
+            var vec = [0.0, 0.0, 0.0, 0.0];
+            for (var i = 0; i < this.segmentSize * 4; i++) {
+                var val = this.frequencyBuffer[i];
+                vec[Math.floor(i / this.segmentSize)] += val * val / (255 - ((255 - val) * i / (this.segmentSize * 4.0)));
+            }
+            return new THREE.Vector4(vec[0] / (256.0 * this.segmentSize), vec[1] / (256.0 * this.segmentSize), vec[2] / (256.0 * this.segmentSize), vec[3] / (256.0 * this.segmentSize));
+        }
+        return new THREE.Vector4(0.0, 0.0, 0.0, 0.0);
     };
     AudioAnalyser.prototype.getTimeDomainData = function () {
         if (this._connected) {
@@ -118,9 +130,11 @@ var AudioManager = (function () {
         }
         var frequencyBuffer = this._audioAnalyser.getFrequencyData();
         var timeDomainBuffer = this._audioAnalyser.getTimeDomainData();
+        var eqSegments = this._audioAnalyser.getEQSegments();
         this._audioEventSubject.onNext({
             frequencyBuffer: frequencyBuffer,
-            timeDomainBuffer: timeDomainBuffer
+            timeDomainBuffer: timeDomainBuffer,
+            eqSegments: eqSegments
         });
     };
     AudioManager.FFT_SIZE = 1024;
@@ -348,9 +362,14 @@ var PropertiesShaderPlane = (function () {
                     case "v2":
                         uniformType = "vec2";
                         break;
+                    case "v4":
+                        uniformType = "vec4";
+                        break;
                     case "t":
                         uniformType = "sampler2D";
                         break;
+                    default:
+                        console.log("Unknown shader");
                 }
                 fragText = "uniform " + uniformType + " " + uniform.name + ";\n" + fragText;
             });
@@ -464,10 +483,15 @@ var AudioUniformProvider = (function () {
             type: "t",
             value: dataTexture
         };
+        this._eqSegments = {
+            name: "eqSegments",
+            type: "v4",
+            value: new THREE.Vector4(0.0, 0.0, 0.0, 0.0)
+        };
         this._audioManager.AudioEventObservable.subscribe(function (ae) { return _this.onAudioEvent(ae); });
     }
     AudioUniformProvider.prototype.glProperties = function () {
-        return Rx.Observable.just([this._audioTexture]);
+        return Rx.Observable.just([this._audioTexture, this._eqSegments]);
     };
     AudioUniformProvider.prototype.onAudioEvent = function (audioEvent) {
         for (var i = 0; i < audioEvent.frequencyBuffer.length; i++) {
@@ -477,6 +501,7 @@ var AudioUniformProvider = (function () {
             this._audioTextureBuffer[i * 4 + 1] = audioEvent.frequencyBuffer[i];
         }
         this._audioTexture.value.needsUpdate = true;
+        this._eqSegments.value = audioEvent.eqSegments;
     };
     return AudioUniformProvider;
 })();
@@ -566,27 +591,58 @@ var GLController = (function () {
     };
     return GLController;
 })();
+/// <reference path='../typed/rx.time-lite.d.ts'/>
 var ShadersController = (function () {
     function ShadersController(shaders) {
         this._shaders = shaders;
         this._shaderUrlSubject = new Rx.Subject();
         this.ShaderUrlObservable = this._shaderUrlSubject.asObservable();
+        this._currentShader = 0;
+        this._currentShaderSubject = new Rx.BehaviorSubject(this._currentShader);
+        this.startAutoplayTimer();
     }
     ShadersController.prototype.shaderNames = function () {
         var shaderNames = [];
         this._shaders.forEach(function (shader) { return shaderNames.push(shader.name); });
         return shaderNames;
     };
+    ShadersController.prototype.currentShaderObservable = function () {
+        return this._currentShaderSubject.asObservable();
+    };
     ShadersController.prototype.onShaderName = function (shaderName) {
         var shaderUrl;
-        this._shaders.forEach(function (shader) {
-            if (shader.name == shaderName) {
-                shaderUrl = shader.url;
+        for (var i = 0; i < this._shaders.length; i++) {
+            if (this._shaders[i].name == shaderName) {
+                this.updateShader(i);
+                break;
             }
-        });
-        if (shaderUrl != undefined) {
-            this._shaderUrlSubject.onNext(shaderUrl);
         }
+    };
+    ShadersController.prototype.updateShader = function (index) {
+        if (this._currentShader == index) {
+            return;
+        }
+        var shader = this._shaders[index];
+        if (shader != undefined) {
+            this._currentShader = index;
+            this._currentShaderSubject.onNext(this._currentShader);
+            this._shaderUrlSubject.onNext(shader.url);
+        }
+    };
+    ShadersController.prototype.onAutoplayChanged = function (autoplay) {
+        if (autoplay) {
+            this.startAutoplayTimer();
+        }
+        else {
+            this._autoplaySub.dispose();
+        }
+    };
+    ShadersController.prototype.startAutoplayTimer = function () {
+        var _this = this;
+        this._autoplaySub = Rx.Observable.timer(30000).subscribe(function (__) {
+            _this.updateShader(((1 + _this._currentShader) % _this._shaders.length));
+            _this.startAutoplayTimer();
+        });
     };
     return ShadersController;
 })();
@@ -598,6 +654,7 @@ var ShadersView = (function () {
     ShadersView.prototype.render = function (el) {
         var _this = this;
         var container = $("<div>", { class: "shaders" });
+        // Select for all of the shaders
         var select = $("<select />");
         select.change(function (__) {
             return _this._shadersController.onShaderName(select.find('option:selected').val());
@@ -606,6 +663,20 @@ var ShadersView = (function () {
             return select.append("<option value=\"" + shaderName + "\">" + shaderName + "</option>");
         });
         container.append(select);
+        // Autoplay to enable autoplay
+        var autoplay = $("<label>", { text: "Autoplay" });
+        var input = $("<input/>", {
+            type: "checkbox",
+            checked: true
+        });
+        input.change(function () {
+            _this._shadersController.onAutoplayChanged(input.is(":checked"));
+        });
+        this._shadersController.currentShaderObservable().subscribe(function (ind) {
+            select.children().eq(ind).prop('selected', true);
+        });
+        autoplay.prepend(input);
+        container.append(autoplay);
         $(el).append(container);
     };
     return ShadersView;

@@ -11,8 +11,8 @@ body {
 }
 
 #playlist-title {
-  position:absolute;
-  top:0px;
+  position: absolute;
+  top: 0px;
   color: white;
   left: 20px;
 }
@@ -74,6 +74,14 @@ body {
   position: absolute;
   top: 16px;
   right: 268px;
+}
+
+.shaders label {
+  color: white;
+}
+
+.shaders label input {
+  vertical-align: bottom;
 }
 
 .queue-container {
